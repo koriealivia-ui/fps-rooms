@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FPS Room with Ceiling Collision</title>
+<style>
+  body { margin: 0; overflow: hidden; background: black; }
+  #ui {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    color: white;
+    font-family: monospace;
+    background: rgba(0,0,0,0.6);
+    padding: 6px;
+  }
+</style>
+</head>
+<body>
+<div id="ui">Click to play | WASD move | Space jump | Mouse look</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+/* ---------- SCENE ---------- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+
+/* ---------- CAMERA & PLAYER ---------- */
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 100);
+const player = new THREE.Object3D();
+player.position.set(0, 1.7, 5);
+scene.add(player);
+camera.position.set(0,0,0);
+player.add(camera);
+
+/* ---------- RENDERER ---------- */
+const renderer = new THREE.WebGLRenderer();
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+/* ---------- ROOM ---------- */
+const walls = [];
+const wallMat = new THREE.MeshBasicMaterial({ color: 0x999999 });
+const floorMat = new THREE.MeshBasicMaterial({ color: 0x777777 });
+const pillarMat = new THREE.MeshBasicMaterial({ color: 0xaa0000 });
+
+function addBox(w,h,d,x,y,z,mat,isFloor=false){
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat);
+    mesh.position.set(x,y,z);
+    if(isFloor) mesh.userData.isFloor = true;
+    scene.add(mesh);
+    walls.push(mesh);
+}
+
+// Floor
+addBox(20,1,20,0,-0.5,0,floorMat,true);
+
+// Walls
+addBox(20,4,1,0,1.5,-10,wallMat);
+addBox(20,4,1,0,1.5,10,wallMat);
+addBox(1,4,20,-10,1.5,0,wallMat);
+addBox(1,4,20,10,1.5,0,wallMat);
+
+// Ceiling (for collisions)
+addBox(20,1,20,0,4.5,0,wallMat); // ceiling at y=4.5
+
+// Small pillar in the middle
+addBox(2,2,2,0,0.5,0,pillarMat);
+
+/* ---------- INPUT ---------- */
+const keys = {};
+window.addEventListener("keydown", e => keys[e.code] = true);
+window.addEventListener("keyup", e => keys[e.code] = false);
+
+/* ---------- MOUSE LOOK ---------- */
+let yaw=0, pitch=0;
+document.body.addEventListener("click", ()=>document.body.requestPointerLock());
+window.addEventListener("mousemove", e=>{
+    if(document.pointerLockElement!==document.body) return;
+    yaw   -= e.movementX*0.002;
+    pitch -= e.movementY*0.002;
+    pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch));
+    player.rotation.y = yaw;
+    camera.rotation.x = pitch;
+});
+
+/* ---------- PHYSICS ---------- */
+const velocity = new THREE.Vector3(0,0,0);
+let onGround = false;
+const radius = 0.3;
+
+function moveAxis(pos, delta, axis){
+    pos[axis] += delta;
+    const playerBox = new THREE.Box3(
+        new THREE.Vector3(pos.x-radius,pos.y-1.7,pos.z-radius),
+        new THREE.Vector3(pos.x+radius,pos.y,pos.z+radius)
+    );
+    for(const w of walls){
+        if(axis!=="y" && w.userData.isFloor) continue; // skip floor for horizontal
+        const box = new THREE.Box3().setFromObject(w);
+        if(box.intersectsBox(playerBox)){
+            pos[axis] -= delta;
+            return;
+        }
+    }
+}
+
+/* ---------- MAIN LOOP ---------- */
+let last = performance.now();
+function animate(now){
+    requestAnimationFrame(animate);
+    const dt = (now-last)/1000;
+    last = now;
+
+    /* --- HORIZONTAL MOVEMENT (yaw-only) --- */
+    const yawMatrix = new THREE.Matrix4().makeRotationY(player.rotation.y);
+    const forward = new THREE.Vector3(0,0,-1).applyMatrix4(yawMatrix);
+    const right   = new THREE.Vector3(1,0,0).applyMatrix4(yawMatrix);
+
+    let move = new THREE.Vector3();
+    if(keys["KeyW"]) move.add(forward);
+    if(keys["KeyS"]) move.sub(forward);
+    if(keys["KeyA"]) move.sub(right);
+    if(keys["KeyD"]) move.add(right);
+
+    if(move.length()>0){
+        move.normalize().multiplyScalar(5*dt);
+        moveAxis(player.position, move.x, "x");
+        moveAxis(player.position, move.z, "z");
+    }
+
+    /* --- VERTICAL MOVEMENT (gravity + jump + collision) --- */
+    velocity.y -= 20*dt;
+    player.position.y += velocity.y*dt;
+
+    let grounded = false;
+    for(const w of walls){
+        const box = new THREE.Box3().setFromObject(w);
+        const px = player.position.x;
+        const pz = player.position.z;
+        const playerBottom = player.position.y - 1.7;
+        const playerTop = player.position.y;
+
+        // horizontal overlap
+        if(px + radius > box.min.x && px - radius < box.max.x &&
+           pz + radius > box.min.z && pz - radius < box.max.z){
+
+            // --- FLOOR / TOP COLLISION ---
+            const top = box.max.y;
+            if(playerBottom <= top && playerBottom >= top - 0.3 && velocity.y <= 0){
+                player.position.y = top + 1.7;
+                velocity.y = 0;
+                grounded = true;
+            }
+
+            // --- CEILING / BOTTOM COLLISION ---
+            const bottom = box.min.y;
+            if(playerTop >= bottom && playerBottom < bottom && velocity.y > 0){
+                player.position.y = bottom;
+                velocity.y = 0;
+            }
+        }
+    }
+    onGround = grounded;
+
+    // Jump input
+    if(keys["Space"] && onGround){
+        velocity.y = 8;
+        onGround = false;
+    }
+
+    renderer.render(scene,camera);
+}
+animate(performance.now());
+
+/* ---------- RESIZE ---------- */
+window.addEventListener("resize", ()=>{
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
